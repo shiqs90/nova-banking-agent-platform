@@ -13,14 +13,14 @@
 images:
   nova:
     repository: us-west1-docker.pkg.dev/mlops-lifecycle-p7-gke/mlops-lifecycle/nova
-    tag: "20260910-c05ff12"
+    tag: "20260911-f57dd37"
   # One image, three Deployments. accounts, transactions, and products are separate
   # entrypoints into the same container, so they promote together by construction —
   # there is no way to leave one connector on a stale build.
   mcp:
     repository: us-west1-docker.pkg.dev/mlops-lifecycle-p7-gke/mlops-lifecycle/mcp-servers
-    tag: "20260910-c05ff12"
+    tag: "20260911-f57dd37"
   # The eval runner. Built by CI from eval/, same as the other two.
   eval:
     repository: us-west1-docker.pkg.dev/mlops-lifecycle-p7-gke/mlops-lifecycle/nova-eval
-    tag: "20260910-c05ff12"
+    tag: "20260911-f57dd37"
