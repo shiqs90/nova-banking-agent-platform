@@ -24,6 +24,20 @@ you debugging a layer that was never broken.
 | 12 | eval scores a working agent at 0.17 | judge was shown tool *calls*, not tool *results* |
 | 13 | `docker build` → `failed to connect to the docker API` | Docker Desktop not running; Cloud Build is the escape hatch |
 | 14 | `kubectl delete job` → NotFound; `set env` → immutable | `ttlSecondsAfterFinished` reaped it; Job pod templates are immutable |
+| 15 | `kubectl` hangs, `dial tcp ...:443: i/o timeout` | home IP rotated; control-plane allowlist held the old one |
+| 16 | `applicationSet.enabled: false` set, pod runs anyway | key removed in chart 10.x; Helm stores unknown values and ignores them |
+| 17 | faithfulness 0.00 on every case, judge flags true claims | deployed image predates `tool_results` by 2.5h; eval only ever ran against local source |
+| 18 | Cloud Build: "forbidden from accessing the bucket", blames `serviceusage` | `storage.objectAdmin` covers objects, not `buckets.get` |
+| 19 | build succeeds, image pushed, gcloud exits 1 | SA can't stream the default logs bucket; needs project `roles/viewer` |
+| 20 | golden set 18/18 three runs in a row | four cases asserted nothing — empty cards, customer with 0 accounts |
+| 21 | lock resolves `anthropic==1.1.0`, venv runs 0.122.0 | `>=0.40` took newest; a major bump onto `httpx2` |
+| 22 | (caught before running) runner would fail after a paid eval | `--set` path relative to CWD; `/app` root-owned under uid 10001 |
+| 23 | `network is unreachable` on the same IP as #15 | laptop had no internet; not the allowlist |
+| 24 | two `argo-rollouts` controller pods | chart default `replicas: 2` with leader election, not a second install |
+| 25 | post-promotion gate aborts a rollout; Nova had zero errors | `sum()` over an absent counter series is empty, not 0 |
+| 26 | faithfulness fails on `AED 782.99` — the number IS in the tool result | tools returned amounts with no currency; 5 of 9 tools, plus a schema gap in `loans` |
+| 27 | six CI edits, validator says `parses OK`, nothing changed | heredoc `"""` collided with a trailing `"`; script died before the first replace |
+| 28 | `/approve` → `list indices must be integers or slices, not str` | resume payload must be `{"decisions": [...]}`; sent a bare list |
 
 ---
 
@@ -679,6 +693,474 @@ ConfigMap, not the image:
 kubectl create configmap seed-script -n nova --from-file=db/seed.py \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+---
+
+## 15. `kubectl` hangs: `dial tcp 35.230.96.96:443: i/o timeout`
+
+### Issue
+
+Every `kubectl` command hung for ~30s then failed with `i/o timeout`. No error, no refusal
+— packets going nowhere.
+
+### How I found it
+
+`kubectl config` subcommands still worked, which proved the kubeconfig was fine and isolated
+it to network reachability:
+
+```bash
+kubectl config current-context        # works — reads a local file
+kubectl get nodes                      # hangs — needs the network
+```
+
+`i/o timeout` means silently dropped, not rejected. On GKE with master authorized networks,
+that is the allowlist. Checked the current public IP against the one Terraform holds:
+
+```bash
+curl -s -4 ifconfig.me                 # 86.98.166.216
+grep authorized_cidr terraform-gcp/variables.tf   # 83.110.175.141/32
+```
+
+Residential IP had rotated.
+
+### How I fixed it
+
+Edited the **default** in `terraform-gcp/variables.tf`, not `-var` — a `-var` does not persist,
+and the next apply would reconcile back to the dead IP:
+
+```bash
+terraform -chdir=terraform-gcp apply
+```
+
+Durable alternative worth knowing: GKE's DNS-based endpoint moves auth from source-IP
+(network layer) to IAM `container.clusters.connect` (identity layer), and the problem stops
+existing.
+
+---
+
+## 16. Helm silently ignored `applicationSet.enabled: false`
+
+### Issue
+
+`gitops/bootstrap/argocd-values.yaml` disabled the ApplicationSet controller. Argo CD came up
+with five pods including `argocd-applicationset-controller`. `dex` and `notifications`, disabled
+in the same file, were correctly absent — so the file was being read.
+
+### How I found it
+
+`helm get values` showed the key as supplied, which was the trap — it reports what you
+*sent*, not what took effect. `helm get values -a` is not decisive either: the computed merge
+echoes unknown supplied keys straight back. The decisive test renders the chart twice:
+
+```bash
+helm template argocd argo/argo-cd --version 10.4.0 \
+  | grep -c "applicationset-controller"           # 28
+helm template argocd argo/argo-cd --version 10.4.0 --set applicationSet.enabled=false \
+  | grep -c "applicationset-controller"           # 28
+```
+
+Expected `28` then `0`. A live `enabled` flag wraps a whole template in `{{- if }}`; equal
+counts mean no such guard exists. Chart 10.x removed the toggle — the controller became core.
+
+### How I fixed it
+
+Removed the dead key, left the controller at the chart default. Helm gives no error for a
+value that matches nothing in the templates; the only proof is the rendered output.
+
+---
+
+## 17. Faithfulness scored 0.00 on every case — and flagged true claims
+
+### Issue
+
+First eval run against the cluster: `faithfulness 0.00` across the board. The "unsupported"
+list contained `The balance on account ACC-00004 is 185,254.95 AED` — which is exactly what
+the tool returns.
+
+### How I found it
+
+The judge is shown no evidence when `tool_results` is empty. Checked the raw response:
+
+```bash
+curl -s -X POST localhost:8000/chat -H 'content-type: application/json' \
+  -d '{"session_id":"probe","message":"What is the balance on ACC-00004?"}' \
+  | python -c "import json,sys; print(sorted(json.load(sys.stdin).keys()))"
+# ['answer','history_messages','latency_ms','model','session_id','tool_calls',
+#  'trace_id','turn_messages','usage']          <- no tool_results
+```
+
+`nova/app.py:388` returns it. The pod did not, because pods run an image:
+
+```bash
+git log --format="%h %ad" --date=iso -S "tool_results" -- nova/app.py
+# f967e18 2026-08-17 15:16:14     <- committed at 15:16
+# live image tag: nova:20260817-1245-nocache   <- built at 12:45
+```
+
+The image predated the field by 2.5 hours. The earlier "successful" runs that scored 0.92 had
+targeted `localhost:8000` — a **locally-run Nova on current source**, not a port-forward. The
+stored `target` field could not tell the two apart.
+
+### How I fixed it
+
+Rebuilt and shipped through the pipeline that this exact incident motivated finishing — CI
+builds, commits the tag, Argo CD rolls it. Faithfulness went to 1.00. The runner now records
+the artifact tag alongside the target so this is a five-second check next time.
+
+---
+
+## 18. Cloud Build: "forbidden from accessing the bucket" — blames `serviceusage`
+
+### Issue
+
+```
+ERROR: (gcloud.builds.submit) The user is forbidden from accessing the bucket
+[mlops-lifecycle-p7-gke_cloudbuild]. Please check ... "serviceusage.services.use"
+```
+
+Service Usage Admin was already granted. Adding more of it changed nothing.
+
+### How I found it
+
+Read the resource named, not the permission suggested. It names a **bucket**.
+`gcloud builds submit` calls `storage.buckets.get` on `<project>_cloudbuild` before uploading
+source. The SA had `roles/storage.objectAdmin`, which covers objects and nothing on the bucket.
+
+### How I fixed it
+
+Bucket-scoped, not project-wide — project `storage.admin` would also hand CI the Terraform
+state bucket:
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://mlops-lifecycle-p7-gke_cloudbuild \
+  --member=serviceAccount:gha-cicd@mlops-lifecycle-p7-gke.iam.gserviceaccount.com \
+  --role=roles/storage.admin
+```
+
+GCP funnels several distinct denials through one error string. The resource is the signal.
+
+---
+
+## 19. Cloud Build: green build, red pipeline
+
+### Issue
+
+```
+Created [https://cloudbuild.googleapis.com/.../builds/f133ad2c-...]
+ERROR: (gcloud.builds.submit) The build is running, and logs are being written to the
+default logs bucket. This tool can only stream logs if you are Viewer/Owner of the project
+Error: Process completed with exit code 1.
+```
+
+The image was in Artifact Registry. gcloud had exited 1 on a build that succeeded.
+
+### How I found it
+
+The message says what it wants: project Viewer/Owner. Two attempts to be cleverer than it
+both failed — `roles/logging.viewer` (wrong role for that check) and `--suppress-logs` (does
+not bypass the pre-stream permission check). A third, an `--async` polling loop, was reverted
+as machinery to avoid one read-only role.
+
+Why it mattered more than a red X: the job died **after** the expensive step and **before**
+"Bump the chart and push" — an image nothing would deploy.
+
+### How I fixed it
+
+```bash
+gcloud projects add-iam-policy-binding mlops-lifecycle-p7-gke \
+  --member=serviceAccount:gha-cicd@... --role=roles/viewer
+```
+
+When an error names the fix, try it first and tighten afterwards.
+
+---
+
+## 20. The golden set was green three times while asserting nothing
+
+### Issue
+
+18/18 passed repeatedly. Four of those passes were vacuous.
+
+### How I found it
+
+`gs-002` (cards on ACC-00004) was known-empty. Checking the other pinned IDs:
+
+```sql
+SELECT customer_id, COUNT(*) FROM accounts WHERE customer_id='CUS-00012' GROUP BY 1;
+-- (0 rows)
+```
+
+`gs-006`, `gs-007`, `gs-016` all keyed on `CUS-00012` — a customer with no accounts and no
+loans, scoring 1.00 against empty tool results. An empty result is trivially faithful.
+
+Two more found by reading the failures, not the passes: `gs-018` scored 0.70 on relevance for
+correctly asking "which account?" (the metric had no carve-out for unanswerable questions);
+`gs-016` expected `[list_accounts, check_balance]` when `list_accounts` already returns
+balance per row — the fixture demanded the exact waste `tool_correctness` penalises.
+
+### How I fixed it
+
+Repointed to `CUS-00034` (5 accounts, 1 loan) via a query that picks by structure, not by
+guess. Added the relevance carve-out to the judge prompt. Fixed `gs-016`'s expectation. Wrote
+`README-placeholders.sql` to re-check the structural facts after any reseed — because **a case
+whose data goes empty keeps passing; nothing in the suite tells you.**
+
+---
+
+## 21. Lock resolved `anthropic==1.1.0`; the validated venv ran 0.122.0
+
+### Issue
+
+`eval/requirements.txt` said `anthropic>=0.40`. `uv pip compile` produced `anthropic==1.1.0`
+plus `httpx2` and `httpcore2` — a major version on a different HTTP stack, never run.
+
+### How I found it
+
+Compared against what produced the 18/18 baseline:
+
+```bash
+.venv/bin/python -c "import importlib.metadata as m; print(m.version('anthropic'))"
+# 0.122.0
+```
+
+Same session, same shape: `helm search repo argo/argo-rollouts` returned "latest" from a
+four-day-old cache. `helm search` never touches the network:
+
+```bash
+ls -la ~/Library/Caches/helm/repository/argo-index.yaml    # Aug 24
+helm repo update argo
+```
+
+### How I fixed it
+
+Pinned `anthropic==0.122.0`; regenerated; confirmed `httpx2` was gone from the lock. Fourth
+resolution incident in this build — `helm search`, `helm install` without `--version`,
+`pip install` without a lock, `uv pip compile` with a range: all resolve against something
+you did not look at.
+
+---
+
+## 22. Two container-only bugs, caught before the first paid run
+
+### Issue
+
+`run_eval.py` worked on the laptop and would have failed in the image — after all 18 cases
+and the judge calls were paid for.
+
+### How I found it
+
+Reading the Dockerfile against the script:
+
+```python
+ap.add_argument("--set", default="eval/golden/questions.yaml")   # relative to CWD
+out = f"eval-results-{run_id}.json"                                 # written to CWD
+```
+
+Image puts the script at `/app` (path does not exist there), owned by root, process runs as
+uid 10001 (write fails).
+
+### How I fixed it
+
+`--set` resolves against `__file__`; added `--out-dir`, Job passes `/tmp`. "Works on my
+laptop" tests the laptop's working directory and user; a container has neither.
+
+---
+
+## 23. `network is unreachable` — same endpoint as #15, different cause
+
+### Issue
+
+`kubectl` failed against the same `35.230.96.96:443` with a different verb.
+
+### How I found it
+
+```bash
+curl -s -4 ifconfig.me; echo      # blank
+```
+
+No internet at all. Three errors seen on this one endpoint, three layers:
+
+| error | meaning |
+|---|---|
+| `i/o timeout` | packets dropped — allowlist (#15) |
+| `network is unreachable` | OS has no route — local connectivity |
+| `connection refused` | something answered and said no — port-forward down |
+
+### How I fixed it
+
+Reconnected. The same IP in every message made three problems look like one; the verb after
+`dial tcp` is the diagnosis.
+
+---
+
+## 24. Two `argo-rollouts` controller pods
+
+### Issue
+
+Fresh install, two pods Running. Two Argo Rollouts *installations* in one cluster would fight
+over the same `Rollout`; two pods looked like that.
+
+### How I found it
+
+```bash
+kubectl -n argo-rollouts get lease
+# argo-rollouts-controller-lock   argo-rollouts-595cb67bb8-sdjhx_...
+```
+
+One holder. Chart default `controller.replicas: 2` for HA; leader election means one
+reconciles, the other stands by.
+
+Finding that default took three attempts: `grep -A3 "^controller:"` (block is 100+ lines),
+then `awk '/^controller:/,/^[a-z]/'` (start line matches both patterns, range closes
+immediately). Plain `grep -n replicas` found it at line 105 at once.
+
+### How I fixed it
+
+Left it. Stop guessing how far away a value sits — search the whole file, or render the chart.
+
+---
+
+## 25. Post-promotion gate aborted a rollout because Nova was perfect
+
+### Issue
+
+Revision 2: golden set passed, promoted, then `error-rate assessed Failed due to failed (2) >
+failureLimit (1)`. Rolled back.
+
+### How I found it
+
+The AnalysisRun holds every measurement:
+
+```bash
+kubectl -n nova get analysisrun nova-6ddcbb9548-2-post -o yaml
+```
+
+```yaml
+- name: error-rate
+  measurements:
+  - {phase: Failed, value: '[]'}       # empty
+  - {phase: Failed, value: '[]'}
+- name: latency-p95
+  measurements:
+  - {phase: Successful, value: '[2.55]'}   # same Prometheus, real data
+```
+
+All 20 synthetic requests succeeded. A labelled counter does not exist until its first
+increment, so `nova_requests_total{status="error"}` was never created, `{status!="ok"}`
+matched nothing, `sum()` of nothing is empty, and `empty / anything = empty`.
+
+### How I fixed it
+
+```promql
+(sum(rate(nova_requests_total{status!~"ok|pending_approval"}[2m])) or vector(0))
+  / sum(rate(nova_requests_total[2m]))
+```
+
+`or vector(0)` floors the numerator. `len(result) > 0` in the successCondition stays: if the
+load Job dies, the denominator is empty and the gate still fails correctly. `!~` not `!=` —
+`!=` compares one literal string, and `{status!="ok|pending_approval"}` would match everything.
+
+---
+
+## 26. Faithfulness: `['AED 782.99', 'AED 668.71', 'AED 114.28']`
+
+### Issue
+
+Revision 3 pre-promotion, then revision 5 again. The numbers were all in the tool result.
+
+### How I found it
+
+The flagged strings share one thing that is not in the tool output — the unit:
+
+```python
+# spending_by_category returned
+{"total_spent": 782.99, "by_category": [{"category": "utilities", "total": 668.71}, ...]}
+# no currency field
+```
+
+The agent wrote "AED" from context. Five of nine tools had the same gap; two account tools
+already returned currency, so the API was inconsistent rather than designed. And the agent
+states the unit only *sometimes* — revision 4 passed the identical suite — so this was
+**gate flakiness**, not a formatting nit.
+
+### How I fixed it
+
+The tool, not the judge — loosening the prompt would teach the metric to tolerate the class of
+claim it exists to catch. Joined `accounts` for `currency` in four tools; one-row lookup in
+`spending_by_category` (it is a `GROUP BY`); alongside `amount` in `initiate_transfer`.
+`get_loans` exposed a schema gap — `loans` has no currency and no `account_id` — so it infers
+from the customer's accounts and returns **null when they disagree**.
+
+---
+
+## 27. Six CI edits reported success — zero applied
+
+### Issue
+
+A python heredoc with six `str.replace` calls on the workflow. The next line ran the YAML
+validator, which printed `parses OK`. Nothing had changed.
+
+### How I found it
+
+```
+          } >> "$GITHUB_STEP_SUMMARY\"\"\"\",
+SyntaxError: unterminated string literal
+```
+
+Replacement text ended in `"`; the heredoc's `"""` closed against it. The script died before
+its first replace. The validator ran regardless, against the unchanged file.
+
+### How I fixed it
+
+One `Edit` per change — each shows a diff, each can be rejected, none can apply zero of six
+silently. A check that runs regardless of whether the prior step succeeded is not a check.
+
+---
+
+## 28. `/approve`: `list indices must be integers or slices, not str`
+
+### Issue
+
+First HITL demo. Two failures in sequence. First, retrying `/chat` on a paused session:
+
+```
+400 - messages.2: `tool_use` ids were found without `tool_result` blocks immediately after
+```
+
+Then on a fresh session, `/approve` returned the `TypeError`.
+
+### How I found it
+
+The first was a corrupted session — the paused checkpoint held `[Human, AI(tool_use)]` with no
+`ToolMessage`; a second `/chat` appended a `HumanMessage` after the dangling `tool_use`.
+Unrecoverable; every retry showed the **same** `toolu_` ID, the tell that it was old state.
+
+The second's HTTP body carried only the message. The location was in the pod, keyed by the
+returned `trace_id`:
+
+```bash
+kubectl -n nova logs -l app=nova --tail=300 | grep -A40 "3bda1051"
+```
+
+```
+File ".../langchain/agents/middleware/human_in_the_loop.py", line 450, in after_model
+    decisions = interrupt(hitl_request)["decisions"]
+```
+
+That line is the contract: `interrupt()` returns what `Command(resume=...)` supplied, and the
+middleware indexes it with `"decisions"`. A bare list had been sent — inferred from the type
+names, flagged as unverified before deploy, and deployed anyway.
+
+### How I fixed it
+
+```python
+Command(resume={"decisions": [decision]})
+```
+
+A traceback is read bottom-up; the line number is an address, the printed source is the
+information. And a known-unverified assumption on a paid path is a decision to pay for finding
+out — `inspect.signature` would have cost thirty seconds. The `/chat` guard against paused
+sessions is still open.
 
 ---
 
