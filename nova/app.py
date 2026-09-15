@@ -492,7 +492,7 @@ async def approve(req: ApprovalRequest):
     try:
         import asyncio
         result = await asyncio.wait_for(
-            state["agent"].ainvoke(Command(resume=[decision]), config=config),
+            state["agent"].ainvoke(Command(resume={"decisions": [decision]}), config=config),
             timeout=REQUEST_TIMEOUT,
         )
     except Exception as exc:
