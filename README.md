@@ -41,18 +41,26 @@ Nova:  → pauses for human approval before executing the write
 
 ```
 1. You change something          prompt, model, tool description, connector
-2. Commit to git
-3. Argo CD deploys it            to a preview endpoint — no real users
-4. Evaluation Hub runs           replays golden + regression sets against preview
-5. Four scores come back         right tool?  right arguments?  answer grounded
-                                 in the tool result?  cost per request?
-6. Pass → promote to production
-   Fail → auto-rollback, nothing ships
+2. Push                          CI builds the image, tags it by commit. Stops there.
+3. Dispatch                      CI commits the tag to charts/nova/values.yaml
+4. Argo CD syncs                 sees the commit, patches the Rollout. Never touches
+                                 a pod itself; holds no CI credential either way.
+5. Argo Rollouts, pre-promotion  new pods behind a PREVIEW Service, no traffic.
+                                 A Job replays 18 golden cases against it — six
+                                 scores, one judge call per case.
+   Fail → new pods scaled down, active Service never moved, nothing shipped
+6. Promote                       active Service selector flips to the new hash
+7. Argo Rollouts, post-promotion 20 synthetic requests, then Prometheus: error
+                                 rate < 5%, p95 < 8s, three samples each
+   Fail → selector flips back to the old ReplicaSet, kept alive for 10 min
 ```
 
-Plus the part the gates can't see: **drift monitoring** catches degradation when *nothing*
-changed — a provider retuning the model under a pinned ID, customers asking question shapes
-the golden set never covered, a connector quietly changing its response format.
+Every path in that diagram has run for real — the rollout history holds a pre-promotion
+abort (revision 3), a post-promotion rollback (revision 2), and clean promotions.
+
+Separately from any deploy: the one tool that moves money, `initiate_transfer`, halts for
+a human. `/chat` returns `pending_approval` with the exact call; `/approve` resumes it; a
+second `/approve` is refused so it cannot run twice. Verified on balances, not on logs.
 
 ---
 
@@ -60,23 +68,32 @@ the golden set never covered, a connector quietly changing its response format.
 
 | Capability | How it's covered here |
 |---|---|
-| **Agentic systems** | LangChain `create_agent`, multi-step tool loop, fallback routing |
-| **Tool calling** | Four tools across three connectors, incl. one consequential write |
+| **Agentic systems** | LangChain `create_agent`, multi-step tool loop, four runaway limits |
+| **Tool calling** | Nine tools across three connectors, incl. one consequential write |
 | **Enterprise connectors / MCP** | Three real MCP servers, consumed via LangChain's MCP adapter |
-| **Agent memory** | LangGraph checkpointer, Redis-backed session state |
-| **Evaluation** | Scored replays as a Kubernetes `Job`/`CronJob`, gating deploys |
-| **LLM-as-judge** | `claude-haiku-4-5`, pinned — faithfulness + relevance reference-free |
-| **Golden + regression sets** | Curated coverage set; append-only never-again set |
-| **Drift monitoring** | Scheduled replay + sampled live-traffic scoring |
-| **Cost engineering** | Cost-per-request as a promotion gate; router distillation |
-| **Kubernetes** | CRD + custom controller, StatefulSets, Jobs, CronJobs, RBAC, scoped ServiceAccounts |
-| **GitOps** | Argo CD pull-based reconciliation — CI never holds cluster credentials |
-| **Progressive delivery** | Argo Rollouts blue-green with pre- and post-promotion analysis |
-| **CI/CD** | GitHub Actions: contract checks → manifest commit → smoke test |
-| **Observability** | Langfuse traces + Prometheus metrics, joined by one `trace_id` |
-| **Model registry / training** | MLflow + in-cluster fine-tuning Job for router distillation |
-| **Security** | PII masking before the prompt leaves the boundary; HITL approval on writes; least-privilege node SA; Workload Identity |
+| **Agent memory** | LangGraph checkpointer, Redis-backed — also what makes HITL resume-by-session work |
+| **Evaluation** | 18-case golden set replayed as a Kubernetes `Job`, the pre-promotion gate |
+| **LLM-as-judge** | `claude-haiku-4-5`, pinned — faithfulness + relevance reference-free, one call per case |
+| **Progressive delivery** | Argo Rollouts blue-green; pre-promotion `job` provider, post-promotion `prometheus` provider; all three outcomes exercised |
+| **GitOps** | Argo CD pull-based reconciliation — CI never holds a cluster credential |
+| **CI/CD** | GitHub Actions: build on push, deploy on dispatch; commit-derived tags; build once, deploy the same artifact |
+| **Kubernetes** | Rollout + AnalysisTemplate CRDs (consumed, not authored), StatefulSets, Jobs, RBAC, scoped ServiceAccounts |
+| **Observability** | Langfuse traces + Prometheus metrics, joined by one `trace_id`; 6 alert rules |
+| **Security** | PII redaction on tool results; human approval on the write tool; least-privilege node SA; Workload Identity |
 | **IaC** | Terraform on GKE via HCP Terraform |
+
+**Scoped but not built** — listed so the gap is stated, not discovered:
+
+| Capability | State |
+|---|---|
+| **Drift monitoring** | Pushgateway + nightly `CronJob` + `PrometheusRule` on score thresholds. Everything it needs exists; ~2h. |
+| **Model registry / training** | MLflow + a distilled router classifier. There is no trained artifact yet, so a registry would be theatre. |
+| **Regression set** | Append-only never-again set. Empty until drift monitoring produces its first failure. |
+| **Cost gate** | `run_eval.py` supports a per-request budget (`NOVA_EVAL_COST_BUDGET_USD`); not yet wired into the Rollout gate. |
+
+There is no `EvaluationRun` CRD or custom controller. One was designed and rejected: the eval
+runs as a plain `Job`, its exit code is the verdict, and two control planes already consume
+that — CI and Argo Rollouts. A third would have had no consumers of its own.
 
 ## Architecture
 
@@ -122,19 +139,27 @@ Scope is `email` only. The built-in detectors are email, credit card, IP, MAC ad
 phone regex would be tractable; `full_name` is not, and a name detector that misses half of them
 is worse than not claiming one.
 
-## The five gates
+## The two gates
 
-| Gate | Runs in | Against | Catches |
-|---|---|---|---|
-| 1. Contract | CI | tool schemas | A tool that doesn't exist, args that don't validate |
-| 2. Smoke | CI | staging | Agent loads but the API is broken |
-| 3. Quality replay | Cluster | **preview** Service | Routing, argument, or grounding regression — before any user is exposed |
-| 4. **Cost budget** | Cluster | **preview** Service | A change that holds quality but doubles tokens |
-| 5. Live metrics | Cluster | **active** Service | Real input distribution, real concurrency |
+| Gate | Provider | Against | Signal | Catches |
+|---|---|---|---|---|
+| **Pre-promotion** | Argo Rollouts `job` | **preview** Service — no traffic | eval `Job` exit code | routing, argument, faithfulness, relevance or coverage regression — before any user is exposed |
+| **Post-promotion** | Argo Rollouts `prometheus` | **active** Service — live | error rate < 5%, p95 < 8s, 3 samples each | what only shows under real requests |
 
-Quality and cost fail independently — a change can keep answering correctly while burning
-twice the tokens through extra tool-loop iterations. Most portfolio projects gate only on
-quality.
+Pre-promotion **prevents** exposure: a failure means the new pods are scaled down and the
+active Service never moved. Post-promotion **reacts** to it: a failure flips the selector back
+to the old ReplicaSet, which `scaleDownDelaySeconds: 600` keeps alive for exactly this.
+
+The post-promotion gate has to generate its own traffic — 20 synthetic requests before the
+first Prometheus sample — because a gate that measures live requests on a platform with none
+either always passes or always blocks. Its error-rate query also floors the numerator with
+`or vector(0)`: a labelled Prometheus counter doesn't exist until its first increment, so a
+100% success rate returns *empty*, not zero, and the first version of this gate rolled back a
+deploy for being perfect.
+
+Two verifications that matter more than the green ones: **revision 3** failed pre-promotion
+and never took traffic; **revision 2** failed post-promotion and was rolled back with nobody
+watching.
 
 ## The six metrics, and why they're separate
 
@@ -222,7 +247,8 @@ No GPU at any point.
 | GKE node pool | ~$0.29–0.38/hr — **scale to zero between sessions** |
 | GKE control plane | Free tier (zonal cluster) |
 | Claude API per 18-question eval run | ~$0.15 — `haiku-4-5` agent ~$0.11 (21 turns; 3 cases have a `setup`) + `haiku-4-5` judge ~$0.05 (one call per case) |
-| Drift monitoring | ~$5/month nightly, ~$1.20/month weekly |
+| **Per deploy** — both gates | ~$0.27: the eval run above + 20 synthetic post-promotion requests. This is why deploy is a manual dispatch, not automatic on push. |
+| Drift monitoring *(not built)* | would be ~$4.50/month nightly |
 
 ```bash
 # Between sessions

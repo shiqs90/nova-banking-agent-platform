@@ -45,19 +45,19 @@ project. The gating half (Argo Rollouts + CI) stays open as 4b.
 
 ---
 
-# CORE BUILD (~47.5h) — ~44h done (**93%**), ~3.5h left as of 2026-08-31
+# CORE BUILD (~47.5h) — ~46h done (**97%**), ~1.5h left as of 2026-09-15
 
-The delivery pipeline is complete and proven end to end: CI builds → git holds the tag →
-Argo CD syncs → Argo Rollouts gates on the golden set → promotes or rolls back unattended.
+Every load-bearing piece is built and proven on real runs: CI builds → git holds the tag →
+Argo CD syncs → Argo Rollouts gates on the golden set → promotes or rolls back unattended →
+the one write tool halts for a human and cannot execute twice.
 
 | remaining | est |
 |---|---|
-| **Phase 2.5 — PII masking + human approval on `initiate_transfer`** | 2h |
 | Judge calibration — hand-label 18, measure agreement with Haiku | 0.5h |
 | Phase 5.6 — Langfuse dataset runs | 1h |
+| Phase 2.5 loose ends — PII trace check, `/chat` paused-session guard, transfer eval case | ~0.5h |
 
-Nothing left is load-bearing for the core story. Phase 2.5 closes the last real gap: a live,
-unguarded write path.
+None of it changes the story. The project is demonstrable as it stands.
 
 End state: a working agent with its safety controls in place (PII masking, approval on writes),
 plus an automated evaluation service that scores it on demand and on a schedule, and alerts when
@@ -175,15 +175,39 @@ of them shipped differently than planned.
       a second thing to read for no benefit. Fixed the doc, not the code.
 - [x] verify: single-tool question correct; follow-up resolves from memory
 
-## Phase 2.5 — PII masking + human approval middleware (~2h)
+## Phase 2.5 — PII masking + human approval middleware (~2h) — DONE 2026-09-15
 
-LangChain prebuilt middleware. Banking makes both **required, not decorative**.
+LangChain prebuilt middleware (`langchain==1.3.15`). Banking makes both **required, not
+decorative**.
 
-- [ ] PII masking — mask names, account numbers, balances before the prompt leaves the boundary
-- [ ] Human-in-the-loop approval — pause before consequential tool calls
-      (**not optional once `initiate_transfer` exists**)
-- [ ] verify: an account number never appears in the outbound prompt (check the Langfuse trace);
-      a transfer request halts and waits rather than executing
+- [x] `HumanInTheLoopMiddleware(interrupt_on={"initiate_transfer": True})` — per-tool, so
+      only the write pauses and the 18-case golden set is untouched
+- [x] `PIIMiddleware("email", strategy="redact", apply_to_tool_results=True)` — on **tool
+      results**, not input. The original plan said "mask account numbers before the prompt
+      leaves the boundary"; that would strip `ACC-00004` before the agent could pass it to a
+      tool and break every case. The PII arrives FROM `get_customer`; redacting it there is
+      the correct boundary. Email only — `full_name` has no reliable regex, and a detector
+      that misses half of them is worse than not claiming one.
+- [x] `POST /approve` — resumes by `session_id`, which IS the token: LangGraph keyed the
+      paused state on `thread_id` in Redis. `approve` | `reject`; `edit` and `respond` exist
+      in the API and are unused.
+- [x] verify: **transfer halts** — `/chat` returned `pending_approval` with the full
+      `action_requests`; balances unchanged
+- [x] verify: **approve executes** — `initiate_transfer` ran, ACC-00004 `185,254.95 →
+      184,754.95`, ACC-00002 `242,477.92 → 242,977.92`
+- [x] verify: **double-approve refused** — second `/approve` returned `nothing_pending`;
+      the transfer cannot run twice
+- [ ] verify: PII — `get_customer` in a Langfuse trace shows `[REDACTED_EMAIL]` in the
+      ToolMessage (gs-013 is the case)
+- [ ] `/chat` guard: refuse a new message on a paused session instead of corrupting it
+      (troubleshooting #28 — a retried `/chat` wedged `hitl-demo` permanently)
+- [ ] golden set: add the reserved `refuse`-shape case asserting a transfer request halts
+
+**Two things learned the expensive way** (troubleshooting #28): the resume payload is
+`Command(resume={"decisions": [...]})` — a dict, stated by one line of library source at
+`human_in_the_loop.py:450`, inferred wrongly from type names and deployed unverified. And a
+`/chat` retry on a paused session appends a `HumanMessage` after a dangling `tool_use`,
+which Anthropic rejects and nothing can repair.
 
 ## Phase 3 — Observability (~5h) — DONE 2026-08-19
 
