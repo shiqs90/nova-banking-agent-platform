@@ -229,6 +229,7 @@ async def lifespan(app: FastAPI):
             # A phone regex is tractable; full_name is not, and a name detector that
             # misses half of them is worse than not claiming one. See README.
             PIIMiddleware("email", strategy="redact", apply_to_tool_results=True),
+            PIIMiddleware("phone", strategy="mask", apply_to_tool_results=True)
         ],
     )
     state["tool_names"] = [t.name for t in tools]
