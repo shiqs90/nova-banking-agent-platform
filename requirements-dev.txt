@@ -9,5 +9,5 @@
 psycopg2-binary==2.9.*     # query the seeded data through a port-forward
 httpx==0.28.*              # call Nova / the MCP servers
 pyyaml==6.*                # golden + regression question sets
-anthropic>=0.40            # the LLM judge in eval/run_eval.py
+anthropic==0.122.0            # the LLM judge in eval/run_eval.py
 ruff==0.9.*                # lint
