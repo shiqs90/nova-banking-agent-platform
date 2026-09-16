@@ -1,7 +1,6 @@
-# Nova - MLOps Banking Agent Platform
+# Nova — Banking Agent Platform
 
-**An MLOps/LLMOps platform: CI/CD for an AI agent, where automated evaluation is the
-deployment gate.**
+**A delivery platform for a banking agent, where the evaluation suite decides what ships.**
 
 Nova is a banking assistant that answers customer questions by calling tools. This repo is the
 platform around it — connectors, memory, tracing, evaluation, and GitOps delivery — built so
@@ -104,9 +103,9 @@ model decides a tool, the MCP connectors query Postgres, the answer goes back, t
 Prometheus scrapes `/metrics`; secrets reach the pods through Workload Identity with no static
 credential on the path.
 
-Generated from `terraform-gcp/` and `k8s/` by
-[`docs/diagrams/nova-gke.py`](docs/diagrams/nova-gke.py). Every edge, the trust boundaries, and
-the tradeoffs behind each choice: [docs/architecture-gke.md](docs/architecture-gke.md).
+The diagram is drawn by [docs/diagrams/nova-gke.py](docs/diagrams/nova-gke.py) from what
+`terraform-gcp/` and `charts/nova/` actually provision. Design notes and tradeoffs are in
+[docs/architecture-gke.md](docs/architecture-gke.md).
 
 ## Tracing
 ![Langfuse tracing](docs/diagrams/langfuse-tracing.png)
