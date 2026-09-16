@@ -1,4 +1,4 @@
-# Nova Banking Agent Platform
+# Nova: Banking Agent Platform
 
 **A delivery platform for a banking agent, where the evaluation suite decides what ships.**
 
