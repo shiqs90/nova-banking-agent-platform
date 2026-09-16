@@ -110,7 +110,23 @@ The diagram is drawn by [docs/diagrams/nova-gke.py](docs/diagrams/nova-gke.py) f
 ## Tracing
 ![Langfuse tracing](docs/diagrams/langfuse-tracing.png)
 
-## PII redaction
+## Guardrails
+
+Both are LangChain's [built-in guardrail middleware](https://docs.langchain.com/oss/python/langchain/guardrails),
+attached to `create_agent` in `nova/app.py`. Neither is decorative in a banking agent: one
+keeps customer data out of the model, the other keeps the model away from the money.
+
+### PII detection
+
+```python
+PIIMiddleware("email", strategy="redact", apply_to_tool_results=True)
+PIIMiddleware("phone", strategy="mask", detector=r"\+\d{9,15}", apply_to_tool_results=True)
+```
+
+| Type | Detector | Strategy | Result in the prompt |
+|---|---|---|---|
+| `email` | built in | `redact` | `[REDACTED_EMAIL]` |
+| `phone` | custom regex, E.164 as seeded (`+971...`) | `mask` | last digits kept, rest masked |
 
 `PIIMiddleware` decides *which messages get scanned*, not just what counts as PII. Three
 independent switches, and the defaults are not the interesting ones:
@@ -126,17 +142,49 @@ tool results are both scanned; model output is not.**
 
 `apply_to_tool_results` is the one that earns its keep. The PII in this system arrives *from*
 `get_customer` (`full_name`, `email`, `phone`), none of which the agent needs to answer a
-balance or transaction question. Redacting the `ToolMessage` before the model sees it means the
-address never reaches the prompt, the Langfuse trace, or the checkpointed session in Redis.
+balance or transaction question. Scrubbing the `ToolMessage` before the model sees it means the
+address and number never reach the prompt, the Langfuse trace, or the checkpointed session in
+Redis. The database still holds the real values; the boundary being protected is the prompt
+leaving the cluster, not the store.
 
 `apply_to_input` is inherited rather than chosen. It costs nothing on the golden set: every
-case keys on an account ID like `ACC-00004`, which the email detector's regex cannot match. But
-it does mean a customer who types their own email hands a placeholder to any tool expecting one.
-No current MCP tool takes an email argument; revisit if one does.
+case keys on an account ID like `ACC-00004`, which neither detector can match. But it does
+mean a customer who types their own email or number hands a placeholder to any tool expecting
+one. No current MCP tool takes either as an argument; revisit if one does.
 
-Scope is `email` only. The built-in detectors are email, credit card, IP, MAC address, and URL. A
-phone regex would be tractable; `full_name` is not, and a name detector that misses half of them
-is worse than not claiming one.
+The phone detector is anchored on the leading `+`, which is what keeps it safe: balances,
+dates, and account IDs contain digits too, and none of them start with a plus sign.
+
+Not covered: `full_name`. There is no reliable regex for arbitrary names, and a detector that
+misses half of them is worse than not claiming one. That needs an NER model, which is out of
+scope.
+
+### Human-in-the-loop
+
+```python
+HumanInTheLoopMiddleware(interrupt_on={"initiate_transfer": True})
+```
+
+Per tool. Only the write pauses; every read tool runs untouched, which is why the golden set
+is unaffected. When the model decides to call `initiate_transfer`, the middleware interrupts
+the graph *before* the tool node runs. Nothing has executed.
+
+Nova is request/response with no UI, so approval is a second HTTP call rather than a button:
+
+| Step | Call | What happens |
+|---|---|---|
+| 1 | `POST /chat` "Transfer 500 from ACC-00004 to ACC-00002" | returns `status: pending_approval` with the exact tool call and its arguments. Balances unchanged. |
+| 2 | `POST /approve {session_id, decision: approve}` | graph resumes, tool executes, model writes the confirmation. Balances moved. |
+| 2' | `POST /approve {..., decision: reject, reason}` | tool skipped; the model is told why and answers the customer instead of erroring |
+| 3 | `POST /approve` again | refused with `nothing_pending`. A transfer cannot run twice because someone clicked twice. |
+
+`session_id` is the resume token. LangGraph keyed the paused state on `thread_id` in Redis, so
+there is nothing extra to store or expire. The approver supplies a *decision*, not arguments;
+the amount and accounts were fixed when the graph paused and cannot be changed on the way back
+in. (`edit` and `respond` exist as decision types for exactly that, and are unused here.)
+
+Verified on balances: ACC-00004 `185,254.95 → 184,754.95`, ACC-00002 `242,477.92 → 242,977.92`,
+with a query between step 1 and step 2 showing both unchanged.
 
 ## The two gates
 
