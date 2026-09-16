@@ -64,7 +64,7 @@ second `/approve` is refused so it cannot run twice. Verified on balances, not o
 
 ---
 
-## What it covers
+## What it covers:
 
 | Capability | How it's covered here |
 |---|---|
