@@ -24,7 +24,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/shiqs90/mlops-agent-platform.git
+    repoURL: https://github.com/shiqs90/nova-banking-agent-platform.git
     targetRevision: main
     # Argo CD auto-detects Chart.yaml here and renders with `helm template`,
     # defaulting to values.yaml. No `helm:` block needed until we override it.

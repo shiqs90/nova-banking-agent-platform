@@ -26,7 +26,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/shiqs90/mlops-agent-platform.git
+    repoURL: https://github.com/shiqs90/nova-banking-agent-platform.git
     targetRevision: main
     path: gitops/apps
     directory:
