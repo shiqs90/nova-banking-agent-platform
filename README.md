@@ -7,7 +7,7 @@ platform around it (connectors, memory, tracing, evaluation, and GitOps delivery
 that **no regression reaches production.**
 
 For a normal Web service the deploy gate is "does it return HTTP 200?" 
-An LLM returns 200, at all times, while quietly being wrong: a prompt tweak makes it pick the wrong tool, a model swap makesit invent numbers the tool never returned. Nothing in a health check, a status code catches that. So the *Evaluation is the health check here*
+An LLM returns 200, at all times, while quietly being wrong: a prompt tweak makes it pick the wrong tool, a model swap makes it invent numbers the tool never returned. Nothing in a health check, a status code catches that. So the *Evaluation is the health check here*
 
 **Video walkthrough (Intro):** [youtu.be/bgJ9z-MRmNw](https://youtu.be/bgJ9z-MRmNw)
 
