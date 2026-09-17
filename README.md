@@ -6,10 +6,8 @@ Nova is a banking assistant that answers customer questions by calling tools. Th
 platform around it (connectors, memory, tracing, evaluation, and GitOps delivery), built so
 that **no regression reaches production.**
 
-For a normal web service the deploy gate is "does it return HTTP 200?" An LLM returns 200 all
-day while quietly being wrong: a prompt tweak makes it pick the wrong tool, a model swap makes
-it invent numbers the tool never returned. Nothing in a health check, a status code, or a
-latency graph catches that. So the evaluation *is* the health check.
+For a normal Web service the deploy gate is "does it return HTTP 200?" 
+An LLM returns 200, at all times, while quietly being wrong: a prompt tweak makes it pick the wrong tool, a model swap makesit invent numbers the tool never returned. Nothing in a health check, a status code catches that. So the *Evaluation is the health check here*
 
 **Video walkthrough (Intro):** [youtu.be/bgJ9z-MRmNw](https://youtu.be/bgJ9z-MRmNw)
 
