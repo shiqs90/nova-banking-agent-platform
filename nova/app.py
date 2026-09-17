@@ -209,8 +209,7 @@ async def lifespan(app: FastAPI):
         system_prompt=SYSTEM_PROMPT,
         checkpointer=checkpointer,
         middleware=[
-            # Only the write tool pauses. Every read tool runs untouched, which is why
-            # the 18-case golden set is unaffected by this.
+            # Only the transfer tool pauses.
             HumanInTheLoopMiddleware(interrupt_on={"initiate_transfer": True}),
 
             # apply_to_tool_results is the flag that matters here: it defaults to
@@ -229,7 +228,7 @@ async def lifespan(app: FastAPI):
             # A phone regex is tractable; full_name is not, and a name detector that
             # misses half of them is worse than not claiming one. See README.
             PIIMiddleware("email", strategy="redact", apply_to_tool_results=True),
-            PIIMiddleware("phone", strategy="mask", apply_to_tool_results=True)
+            PIIMiddleware("phone", strategy="mask", detector=r"\+\d{9,15}", apply_to_tool_results=True)
         ],
     )
     state["tool_names"] = [t.name for t in tools]
