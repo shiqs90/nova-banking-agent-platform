@@ -2,8 +2,6 @@
 
 **A delivery platform for a banking agent, where the evaluation suite decides what ships.**
 
-Video walkthrough (Intro): [youtu.be/bgJ9z-MRmNw](https://youtu.be/bgJ9z-MRmNw)
-
 Nova is a banking assistant that answers customer questions by calling tools. This repo is the
 platform around it (connectors, memory, tracing, evaluation, and GitOps delivery), built so
 that **no change to Nova reaches production without proving it didn't make the answers worse.**
@@ -12,6 +10,8 @@ For a normal web service the deploy gate is "does it return HTTP 200?" An LLM re
 day while quietly being wrong: a prompt tweak makes it pick the wrong tool, a model swap makes
 it invent numbers the tool never returned. Nothing in a health check, a status code, or a
 latency graph catches that. So the evaluation *is* the health check.
+
+**Video walkthrough (Intro):** [youtu.be/bgJ9z-MRmNw](https://youtu.be/bgJ9z-MRmNw)
 
 ---
 
