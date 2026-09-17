@@ -4,7 +4,7 @@
 
 Nova is a banking assistant that answers customer questions by calling tools. This repo is the
 platform around it (connectors, memory, tracing, evaluation, and GitOps delivery), built so
-that **no change to Nova reaches production without proving it didn't make the answers worse.**
+that **no regression reaches production.**
 
 For a normal web service the deploy gate is "does it return HTTP 200?" An LLM returns 200 all
 day while quietly being wrong: a prompt tweak makes it pick the wrong tool, a model swap makes
