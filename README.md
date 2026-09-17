@@ -2,7 +2,7 @@
 
 **A delivery platform for a banking agent, where the evaluation suite decides what ships.**
 
-Intro video walkthrough: [youtu.be/bgJ9z-MRmNw](https://youtu.be/bgJ9z-MRmNw)
+Video walkthrough (Intro): [youtu.be/bgJ9z-MRmNw](https://youtu.be/bgJ9z-MRmNw)
 
 Nova is a banking assistant that answers customer questions by calling tools. This repo is the
 platform around it (connectors, memory, tracing, evaluation, and GitOps delivery), built so
